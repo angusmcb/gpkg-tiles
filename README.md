@@ -16,7 +16,7 @@ python -m pip install "gpkg-tiles @ git+https://github.com/OWNER/gpkg-tiles.git"
 For reproducible installations, pin a release tag or commit:
 
 ```shell
-python -m pip install "gpkg-tiles @ git+https://github.com/OWNER/gpkg-tiles.git@v0.1.0"
+python -m pip install "gpkg-tiles @ git+https://github.com/OWNER/gpkg-tiles.git@v0.2.0"
 ```
 
 The project requires Python 3.10 or newer. NumPy and Pillow are installed as
@@ -73,6 +73,27 @@ with GpkgTiles.create(
 ) as coverage:
     coverage.put(coverage.base_zoom, 0, 0, np.zeros((256, 256), dtype=np.float32))
 ```
+
+## Building overviews
+
+`build_overviews()` rebuilds the coarser zoom levels already defined by the
+layer. By default it builds every level below `base_zoom` using nearest-neighbor
+resampling. It does not create new zoom levels or reproject the data.
+
+```python
+from gpkg_tiles import GpkgTiles
+
+with GpkgTiles.open("result.gpkg", "imagery") as tiles:
+    # Image overviews are WebP by default.
+    tiles.build_overviews(resampling="average")
+
+    # Rebuild selected levels, using JPEG with PNG for transparency.
+    tiles.build_overviews(levels=[2, 1], image_format="jpeg")
+```
+
+Image overviews use WebP by default. With `image_format="jpeg"`, opaque tiles
+use JPEG and tiles containing transparency use RGBA PNG. Coverage overviews
+preserve missing cells when the layer defines a `data_null` value.
 
 ## Development
 

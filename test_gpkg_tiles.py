@@ -3,6 +3,7 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from gpkg_tiles import GpkgTiles
 
@@ -80,6 +81,49 @@ class CoverageDtypeTests(unittest.TestCase):
             actual = coverage.get(coverage.base_zoom, 0, 0)
             self.assertEqual(coverage.dtype, np.dtype(np.float32))
             self.assertEqual(actual.dtype, np.dtype(np.float32))
+
+
+class ImageOverviewFormatTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.work = tempfile.TemporaryDirectory()
+        self.output = Path(self.work.name) / "imagery.gpkg"
+        sample = Path(__file__).parent / "example_geopackages" / "small_world_jpg_png.gpkg"
+        self.source = GpkgTiles.open(sample, "small_world_jpg_png")
+
+    def tearDown(self) -> None:
+        self.source.close()
+        self.work.cleanup()
+
+    def test_overview_image_format_policy(self) -> None:
+        with GpkgTiles.create(self.output, "imagery", like=self.source) as imagery:
+            # Make this test grid fully covered vertically. The public sample's
+            # coarse matrix intentionally extends beyond its single source row.
+            imagery._matrix[0]["pixel_y_size"] = imagery._matrix[1]["pixel_y_size"]
+            size = (imagery.tile_width, imagery.tile_height)
+            imagery.put(imagery.base_zoom, 0, 0, Image.new("RGB", size, "red"))
+            imagery.put(imagery.base_zoom, 1, 0, Image.new("RGBA", size, (0, 0, 255, 0)))
+
+            imagery.build_overviews()
+            webp = imagery.get(0, 0, 0)
+            self.assertEqual(webp.format, "WEBP")
+            self.assertEqual(webp.getchannel("A").getextrema()[0], 0)
+            extension = imagery._connection().execute(
+                "SELECT 1 FROM gpkg_extensions WHERE table_name=? "
+                "AND column_name='tile_data' AND extension_name='gpkg_webp'",
+                (imagery.table,),
+            ).fetchone()
+            self.assertIsNotNone(extension)
+
+            imagery.build_overviews(image_format="jpeg")
+            transparent = imagery.get(0, 0, 0)
+            self.assertEqual(transparent.format, "PNG")
+            self.assertEqual(transparent.mode, "RGBA")
+
+            imagery.put(imagery.base_zoom, 1, 0, Image.new("RGB", size, "blue"))
+            imagery.build_overviews(image_format="jpeg")
+            opaque = imagery.get(0, 0, 0)
+            self.assertEqual(opaque.format, "JPEG")
+            self.assertEqual(opaque.mode, "RGB")
 
 
 if __name__ == "__main__":

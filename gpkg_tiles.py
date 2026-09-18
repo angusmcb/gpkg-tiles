@@ -664,14 +664,21 @@ class GpkgTiles:
         raise NotImplementedError
 
     def build_overviews(
-        self, levels: Iterable[int] | None = None, *, resampling: str = "nearest"
+        self,
+        levels: Iterable[int] | None = None,
+        *,
+        resampling: str = "nearest",
+        image_format: Literal["webp", "jpeg"] | None = None,
     ) -> None:
         """Rebuild existing coarser zoom levels from the next finer level.
 
         ``levels`` contains GeoPackage zoom levels, not scale factors.  By
         default all levels below ``base_zoom`` are rebuilt, finest first.
         Existing tiles at rebuilt levels are replaced.  The tile matrix set
-        must be aligned, and its pixel-size ratios must be positive.
+        must be aligned, and its pixel-size ratios must be positive.  Image
+        overviews default to WebP; ``image_format="jpeg"`` uses JPEG for opaque
+        tiles and RGBA PNG for tiles containing transparency.  ``image_format``
+        does not apply to gridded coverages.
         """
         targets = sorted(
             (set(self.zooms[:-1]) if levels is None else set(levels)), reverse=True
@@ -684,6 +691,13 @@ class GpkgTiles:
         method = resampling.lower()
         if method not in allowed:
             raise ValueError(f"resampling must be one of {sorted(allowed)}")
+        overview_image_format: str | None = None
+        if isinstance(self, GpkgImageTiles):
+            overview_image_format = "webp" if image_format is None else image_format.lower()
+            if overview_image_format not in {"webp", "jpeg"}:
+                raise ValueError("image_format must be 'webp' or 'jpeg'")
+        elif image_format is not None:
+            raise ValueError("image_format applies only to image tile layers")
         db = self._connection()
         for target_z in targets:
             finer = None
@@ -702,9 +716,15 @@ class GpkgTiles:
                     f"(SELECT id FROM {_q(self.table)} WHERE zoom_level=?)", (self.table, target_z),
                 )
             db.execute(f"DELETE FROM {_q(self.table)} WHERE zoom_level=?", (target_z,))
-            self._build_level(finer, target_z, method)
+            self._build_level(finer, target_z, method, overview_image_format)
 
-    def _build_level(self, source_z: int, target_z: int, method: str) -> None:
+    def _build_level(
+        self,
+        source_z: int,
+        target_z: int,
+        method: str,
+        image_format: str | None,
+    ) -> None:
         sm, tm = self._matrix[source_z], self._matrix[target_z]
         rx = tm["pixel_x_size"] / sm["pixel_x_size"]
         ry = tm["pixel_y_size"] / sm["pixel_y_size"]
@@ -725,13 +745,15 @@ class GpkgTiles:
                 for tx in range(max(0, tx0), min(tm["matrix_width"], tx1)):
                     targets.add((tx, ty))
         for tx, ty in sorted(targets, key=lambda p: (p[1], p[0])):
-            result = self._resample_tile(source_z, target_z, tx, ty, rx, ry, method)
+            result = self._resample_tile(
+                source_z, target_z, tx, ty, rx, ry, method, image_format
+            )
             if result is not None:
                 self.put(target_z, tx, ty, result)
 
     def _resample_tile(
         self, source_z: int, target_z: int, tx: int, ty: int,
-        rx: float, ry: float, method: str,
+        rx: float, ry: float, method: str, image_format: str | None,
     ) -> Any | None:
         raise NotImplementedError
 
@@ -838,7 +860,7 @@ class GpkgImageTiles(GpkgTiles):
 
     def _resample_tile(
         self, source_z: int, target_z: int, tx: int, ty: int,
-        rx: float, ry: float, method: str,
+        rx: float, ry: float, method: str, image_format: str | None,
     ) -> Any | None:
         Image, _ = _pillow()
         sm, tm = self._matrix[source_z], self._matrix[target_z]
@@ -865,7 +887,18 @@ class GpkgImageTiles(GpkgTiles):
             "bilinear": Image.Resampling.BILINEAR, "bicubic": Image.Resampling.BICUBIC,
             "lanczos": Image.Resampling.LANCZOS, "mode": Image.Resampling.NEAREST,
         }
-        return canvas.resize((tm["tile_width"], tm["tile_height"]), filters[method])
+        result = canvas.resize((tm["tile_width"], tm["tile_height"]), filters[method])
+        if image_format == "webp":
+            result.format = "WEBP"
+            return result
+        if image_format != "jpeg":
+            raise AssertionError(f"unexpected overview image format {image_format!r}")
+        if result.getchannel("A").getextrema()[0] < 255:
+            result.format = "PNG"
+            return result
+        opaque = result.convert("RGB")
+        opaque.format = "JPEG"
+        return opaque
 
 
 class GpkgGriddedCoverage(GpkgTiles):
@@ -1179,7 +1212,7 @@ class GpkgGriddedCoverage(GpkgTiles):
 
     def _resample_tile(
         self, source_z: int, target_z: int, tx: int, ty: int,
-        rx: float, ry: float, method: str,
+        rx: float, ry: float, method: str, image_format: str | None,
     ) -> Any | None:
         np = _numpy()
         Image, _ = _pillow()
